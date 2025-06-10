@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel Data Cleanser</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6; /* Light gray background */
+        }
+        .container {
+            max-width: 800px;
+        }
+    </style>
+</head>
+<body class="flex items-center justify-center min-h-screen p-4">
+    <div class="container bg-white p-8 rounded-lg shadow-xl border border-gray-200">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">Aceng Cleanser</h1>
+        <p class="text-gray-600 mb-8 text-center">
+            Upload your Excel file (.xlsx) specify keyword dan pastikan sheet utama, sheet cuma 1 yang paling depan
+        </p>
+
+        <div class="mb-6">
+            <label for="excelFile" class="block text-gray-700 text-sm font-medium mb-2">
+                Select your Excel file (.xlsx):
+            </label>
+            <input type="file" id="excelFile" accept=".xlsx"
+                   class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+        </div>
+
+        <div class="mb-6">
+            <label for="keywords" class="block text-gray-700 text-sm font-medium mb-2">
+                Keywords to exclude (comma-separated, e.g., "gopay, dijual, promo"):
+            </label>
+            <input type="text" id="keywords" placeholder="Enter keywords here..."
+                   class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <p class="text-xs text-gray-500 mt-1">dont leave empty.</p>
+        </div>
+
+        <button id="processButton"
+                class="w-full bg-blue-600 text-white font-semibold py-3 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-300 ease-in-out transform hover:scale-105"
+                disabled>
+            Process File
+        </button>
+
+        <div id="messageArea" class="mt-8 p-4 bg-blue-100 border border-blue-200 text-blue-800 rounded-md hidden">
+            <p class="font-medium">Processing your file...</p>
+            <p class="text-sm">This might take a moment. Please wait.</p>
+        </div>
+
+        <div id="downloadArea" class="mt-8 hidden">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Download Your Files:</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <a id="cleanedDownload" href="#" download="cleaned_data.xlsx"
+                   class="block bg-green-500 text-white text-center py-3 rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition duration-300 ease-in-out transform hover:scale-105">
+                    Download Cleaned Data
+                </a>
+                <a id="excludedDownload" href="#" download="excluded_items.xlsx"
+                   class="block bg-red-500 text-white text-center py-3 rounded-md hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 transition duration-300 ease-in-out transform hover:scale-105">
+                    Download Excluded Items
+                </a>
+            </div>
+            <p class="text-sm text-gray-500 mt-4 text-center">
+                
+            </p>
+        </div>
+    </div>
+
+    <script>
+        const excelFileInput = document.getElementById('excelFile');
+        const keywordsInput = document.getElementById('keywords'); // New: Keywords input
+        const processButton = document.getElementById('processButton');
+        const messageArea = document.getElementById('messageArea');
+        const downloadArea = document.getElementById('downloadArea');
+        const cleanedDownload = document.getElementById('cleanedDownload');
+        const excludedDownload = document.getElementById('excludedDownload');
+
+        // Enable/disable button based on file selection
+        excelFileInput.addEventListener('change', () => {
+            if (excelFileInput.files.length > 0) {
+                processButton.disabled = false;
+            } else {
+                processButton.disabled = true;
+            }
+        });
+
+        processButton.addEventListener('click', () => {
+            const file = excelFileInput.files[0];
+            if (!file) {
+                alert('Please select an Excel file first.'); // In a real app, use a custom modal
+                return;
+            }
+
+            // Get keywords from input, split by comma, trim spaces, filter empty strings
+            const rawKeywords = keywordsInput.value.trim();
+            let keywords = [];
+            if (rawKeywords) {
+                keywords = rawKeywords.split(',').map(kw => kw.trim()).filter(kw => kw !== '');
+            }
+            // If no keywords are provided, use defaults
+            if (keywords.length === 0) {
+                keywords = ['gopay', 'dijual'];
+            }
+
+
+            // Show processing message
+            messageArea.classList.remove('hidden');
+            downloadArea.classList.add('hidden');
+            processButton.disabled = true; // Disable button during processing
+
+            // --- ACTUAL SERVER-SIDE PROCESSING ---
+            const formData = new FormData();
+            formData.append('excelFile', file);
+            formData.append('keywords', JSON.stringify(keywords)); // Send keywords as a JSON string
+
+            fetch('/process-excel', { // This URL is your Flask server endpoint
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (!response.ok) {
+                    // If the server response was not ok (e.g., 4xx or 5xx status)
+                    return response.json().then(err => Promise.reject(err));
+                }
+                return response.json();
+            })
+            .then(data => {
+                // Assuming 'data' contains 'cleaned_url' and 'excluded_url' from your Flask app
+                messageArea.classList.add('hidden');
+                downloadArea.classList.remove('hidden');
+
+                // Update cleanedDownload.href and excludedDownload.href with actual URLs from your server
+                cleanedDownload.href = data.cleaned_url;
+                excludedDownload.href = data.excluded_url;
+                processButton.disabled = false; // Re-enable button
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                messageArea.innerHTML = `<p class="font-medium text-red-800">An error occurred during processing: ${error.error || 'Unknown error'}</p>`;
+                messageArea.classList.remove('hidden');
+                processButton.disabled = false; // Re-enable button
+            });
+        });
+    </script>
+</body>
+</html>
