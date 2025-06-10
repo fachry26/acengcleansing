@@ -1,10 +1,23 @@
 import pandas as pd
 import os
+import time # Import the time module
 
 def process_data_excel(input_filepath, cleaned_output_filepath, excluded_output_filepath, keywords_list=None):
-    
+    """
+    Reads an Excel dataset, separates rows based on 'KONTEN' column containing
+    any of the provided keywords (case-insensitive), and saves them into two different Excel files.
+
+    Args:
+        input_filepath (str): The path to the input Excel file (.xlsx). This file will be deleted after processing.
+        cleaned_output_filepath (str): The path where the cleaned Excel file (without
+                                       excluded keywords) will be saved (.xlsx).
+        excluded_output_filepath (str): The path where the excluded Excel file (with
+                                        excluded keywords) will be saved (.xlsx).
+        keywords_list (list, optional): A list of strings representing keywords to exclude.
+                                        Defaults to ['gopay', 'dijual'] if None or empty.
+    """
     if keywords_list is None or not keywords_list:
-        keywords_list = [] # Default keywords
+        keywords_list = ['gopay', 'dijual'] # Default keywords
 
     try:
         # Read the Excel file into a pandas DataFrame
@@ -62,6 +75,16 @@ def process_data_excel(input_filepath, cleaned_output_filepath, excluded_output_
     except Exception as e:
         # Catch any other unexpected errors during pandas operations
         raise Exception(f"An error occurred during data processing: {e}")
+    finally:
+        # --- Delete the input file immediately after processing ---
+        if os.path.exists(input_filepath):
+            try:
+                # Add a small delay to ensure file handles are released
+                time.sleep(0.5) # Wait for 0.5 seconds
+                os.remove(input_filepath)
+                print(f"Deleted uploaded temporary file: {input_filepath}")
+            except Exception as e:
+                print(f"Error deleting input file {input_filepath}: {e}")
 
 # This part is typically not run when imported by app.py,
 # but can be useful for standalone testing of the processor script.
@@ -82,7 +105,7 @@ if __name__ == "__main__":
         ]
     }
     dummy_df = pd.DataFrame(dummy_data)
-    test_input_file = 'test_data_dynamic.xlsx'
+    test_input_file = 'test_data_dynamic_to_delete.xlsx' # Changed name for test
     dummy_df.to_excel(test_input_file, index=False)
 
     test_cleaned_output = 'test_cleaned_data_dynamic.xlsx'
@@ -94,6 +117,11 @@ if __name__ == "__main__":
         print(f"\n--- Testing with custom keywords: {test_keywords_custom} ---")
         process_data_excel(test_input_file, test_cleaned_output, test_excluded_output, test_keywords_custom)
         print("Standalone test with custom keywords completed successfully.")
+        # Verify input file is deleted after test
+        if not os.path.exists(test_input_file):
+            print(f"Test input file {test_input_file} was successfully deleted.")
+        else:
+            print(f"Test input file {test_input_file} was NOT deleted.")
     except Exception as e:
         print(f"Standalone test with custom keywords failed: {e}")
 
@@ -101,16 +129,22 @@ if __name__ == "__main__":
     test_keywords_default = ['gopay', 'dijual'] # Explicitly setting defaults for test clarity
     test_cleaned_output_default = 'test_cleaned_data_default.xlsx'
     test_excluded_output_default = 'test_excluded_items_default.xlsx'
+    test_input_file_default = 'test_data_dynamic_default_to_delete.xlsx' # New input file for default test
+    dummy_df.to_excel(test_input_file_default, index=False) # Create it for this test
+
     try:
         print(f"\n--- Testing with default keywords: {test_keywords_default} ---")
-        process_data_excel(test_input_file, test_cleaned_output_default, test_excluded_output_default, test_keywords_default)
+        process_data_excel(test_input_file_default, test_cleaned_output_default, test_excluded_output_default, test_keywords_default)
         print("Standalone test with default keywords completed successfully.")
+        # Verify input file is deleted after test
+        if not os.path.exists(test_input_file_default):
+            print(f"Test input file {test_input_file_default} was successfully deleted.")
+        else:
+            print(f"Test input file {test_input_file_default} was NOT deleted.")
     except Exception as e:
         print(f"Standalone test with default keywords failed: {e}")
 
-    # Clean up dummy file
-    if os.path.exists(test_input_file):
-        os.remove(test_input_file)
+    # Clean up dummy output files (input files are handled by the function's finally block)
     if os.path.exists(test_cleaned_output):
         os.remove(test_cleaned_output)
     if os.path.exists(test_excluded_output):
