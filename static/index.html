@@ -3,8 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Excel Data Cleanser</title>
-    <!-- Tailwind CSS CDN -->
+    <title>Aceng Cleanser</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
@@ -21,8 +20,7 @@
     <div class="container bg-white p-8 rounded-lg shadow-xl border border-gray-200">
         <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">Aceng Cleanser</h1>
         <p class="text-gray-600 mb-8 text-center">
-            Upload your Excel file (.xlsx) specify keyword dan pastikan sheet utama, sheet cuma 1 yang paling depan
-            FILE WILL BE DELETED AFTER 15S GENERATED
+            Upload your Excel file (.xlsx). FILL SHEET NAME (case sensitive). File will be deleted after 15s.
         </p>
 
         <div class="mb-6">
@@ -35,11 +33,20 @@
 
         <div class="mb-6">
             <label for="keywords" class="block text-gray-700 text-sm font-medium mb-2">
-                Keywords to exclude (comma-separated, e.g., "gopay, dijual, promo"):
+                Keywords to exclude (comma-separated, e.g., "gopay, dijual, promo ramadan", can add emoticon, can add spacing like "perusahaan gas negara"):
             </label>
             <input type="text" id="keywords" placeholder="Enter keywords here..."
                    class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
-            <p class="text-xs text-gray-500 mt-1">dont leave empty.</p>
+            <p class="text-xs text-gray-500 mt-1">Leave empty if you only want to filter by foreign language characters ONLY. By default foreign character pasti kehapus mau masukin keyword diatas juga</p>
+        </div>
+
+        <div class="mb-6">
+            <label for="inputSheetName" class="block text-gray-700 text-sm font-medium mb-2">
+                Input Sheet Name (e.g., "Media Sosial", "Media Konvensional"):
+            </label>
+            <input type="text" id="inputSheetName" value="Media Sosial"
+                   class="w-full px-4 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+            <p class="text-xs text-gray-500 mt-1">Sheet name</p>
         </div>
 
         <button id="processButton"
@@ -54,7 +61,7 @@
         </div>
 
         <div id="downloadArea" class="mt-8 hidden">
-            <h2 class="text-xl font-semibold text-gray-800 mb-4">Download Your Files:</h2>
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Download:</h2>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <a id="cleanedDownload" href="#" download="cleaned_data.xlsx"
                    class="block bg-green-500 text-white text-center py-3 rounded-md hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 transition duration-300 ease-in-out transform hover:scale-105">
@@ -66,14 +73,15 @@
                 </a>
             </div>
             <p class="text-sm text-gray-500 mt-4 text-center">
-                
+                The files should download automatically. If not, click the links above.
             </p>
         </div>
     </div>
 
     <script>
         const excelFileInput = document.getElementById('excelFile');
-        const keywordsInput = document.getElementById('keywords'); // New: Keywords input
+        const keywordsInput = document.getElementById('keywords');
+        const inputSheetNameInput = document.getElementById('inputSheetName');
         const processButton = document.getElementById('processButton');
         const messageArea = document.getElementById('messageArea');
         const downloadArea = document.getElementById('downloadArea');
@@ -92,7 +100,7 @@
         processButton.addEventListener('click', () => {
             const file = excelFileInput.files[0];
             if (!file) {
-                alert('Please select an Excel file first.'); // In a real app, use a custom modal
+                alert('Please select an Excel file first.');
                 return;
             }
 
@@ -102,48 +110,55 @@
             if (rawKeywords) {
                 keywords = rawKeywords.split(',').map(kw => kw.trim()).filter(kw => kw !== '');
             }
-            // If no keywords are provided, use defaults
-            if (keywords.length === 0) {
-                keywords = ['gopay', 'dijual'];
-            }
+            
+            // The backend (app.py and excel_processor.py) will handle defaults if 'keywords' array is empty.
 
+
+            // Get selected input sheet name
+            const inputSheetName = inputSheetNameInput.value.trim() || 'Media Sosial';
 
             // Show processing message
             messageArea.classList.remove('hidden');
             downloadArea.classList.add('hidden');
-            processButton.disabled = true; // Disable button during processing
+            processButton.disabled = true;
 
             // --- ACTUAL SERVER-SIDE PROCESSING ---
             const formData = new FormData();
             formData.append('excelFile', file);
-            formData.append('keywords', JSON.stringify(keywords)); // Send keywords as a JSON string
+            formData.append('keywords', JSON.stringify(keywords)); // Send potentially empty array
+            formData.append('inputSheetName', inputSheetName);
 
-            fetch('/process-excel', { // This URL is your Flask server endpoint
+            fetch('/process-excel', {
                 method: 'POST',
                 body: formData
             })
             .then(response => {
                 if (!response.ok) {
-                    // If the server response was not ok (e.g., 4xx or 5xx status)
                     return response.json().then(err => Promise.reject(err));
                 }
                 return response.json();
             })
             .then(data => {
-                // Assuming 'data' contains 'cleaned_url' and 'excluded_url' from your Flask app
                 messageArea.classList.add('hidden');
                 downloadArea.classList.remove('hidden');
-
-                // Update cleanedDownload.href and excludedDownload.href with actual URLs from your server
+                
+                // Set href and programmatically click to download
                 cleanedDownload.href = data.cleaned_url;
-                excludedDownload.href = data.excluded_url;
-                processButton.disabled = false; // Re-enable button
+                cleanedDownload.click(); // Trigger download for cleaned file
+
+                // Add a small delay before the second download to avoid potential browser issues
+                setTimeout(() => {
+                    excludedDownload.href = data.excluded_url;
+                    excludedDownload.click(); // Trigger download for excluded file
+                }, 500); // 500ms delay
+
+                processButton.disabled = false;
             })
             .catch(error => {
                 console.error('Error:', error);
                 messageArea.innerHTML = `<p class="font-medium text-red-800">An error occurred during processing: ${error.error || 'Unknown error'}</p>`;
                 messageArea.classList.remove('hidden');
-                processButton.disabled = false; // Re-enable button
+                processButton.disabled = false;
             });
         });
     </script>

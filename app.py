@@ -1,25 +1,22 @@
 import os
 import json
-import threading # Import threading for background tasks
-import time      # Import time for delays
+import threading
+import time
 from flask import Flask, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
-import excel_processor # Import your data processing script
+import excel_processor
 
 app = Flask(__name__)
 
 # Configure upload and processed file directories
-# Ensure these directories exist and the server has write permissions
 UPLOAD_FOLDER = 'uploads'
 PROCESSED_FOLDER = 'processed_files'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER
 
-# Create the directories if they don't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
-# Allowed extensions for uploaded files
 ALLOWED_EXTENSIONS = {'xlsx'}
 
 def allowed_file(filename):
@@ -46,13 +43,12 @@ def delete_files_after_delay(file_paths, delay_seconds=15):
 @app.route('/')
 def serve_index():
     """Serves the index.html file."""
-    # This assumes index.html is directly in the static folder
     return send_from_directory('static', 'index.html')
 
 @app.route('/process-excel', methods=['POST'])
 def process_excel_file():
     """
-    Handles the uploaded Excel file, processes it with dynamic keywords,
+    Handles the uploaded Excel file, processes it with dynamic keywords and input sheet name,
     returns download links, and schedules the deletion of processed files.
     """
     if 'excelFile' not in request.files:
@@ -65,10 +61,8 @@ def process_excel_file():
 
     # Get keywords from the form data
     keywords_json = request.form.get('keywords')
-    if not keywords_json:
-        # Fallback to default if no keywords are provided (should be handled by frontend)
-        keywords_list = ['gopay', 'dijual']
-    else:
+    keywords_list = []
+    if keywords_json:
         try:
             keywords_list = json.loads(keywords_json)
             if not isinstance(keywords_list, list):
@@ -77,36 +71,38 @@ def process_excel_file():
             return jsonify({'error': 'Invalid keywords format'}), 400
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
+    if not keywords_list: # Default if empty or invalid JSON
+        keywords_list = []
 
+    # Get input sheet name from the form data
+    input_sheet_name = request.form.get('inputSheetName', 'Sheet1').strip()
+    if not input_sheet_name: # Ensure it's not an empty string after strip
+        input_sheet_name = 'Sheet1'
 
     if file and allowed_file(file.filename):
-        # Secure the filename to prevent directory traversal attacks
         filename = secure_filename(file.filename)
         input_filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(input_filepath)
 
-        # Define output file paths for cleaned and excluded data
         cleaned_output_filename = f"cleaned_{filename}"
         excluded_output_filename = f"excluded_{filename}"
         cleaned_output_filepath = os.path.join(app.config['PROCESSED_FOLDER'], cleaned_output_filename)
         excluded_output_filepath = os.path.join(app.config['PROCESSED_FOLDER'], excluded_output_filename)
 
         try:
-            # Pass the keywords_list to the data processing function
+            # Pass the keywords_list AND input_sheet_name to the data processing function
             excel_processor.process_data_excel(
                 input_filepath,
                 cleaned_output_filepath,
                 excluded_output_filepath,
-                keywords_list # Pass keywords here
+                keywords_list,
+                input_sheet_name # NEW: Pass input sheet name
             )
 
-            # Schedule the deletion of the processed output files after a delay
-            # These files are in PROCESSED_FOLDER
             deletion_files = [cleaned_output_filepath, excluded_output_filepath]
             deleter_thread = threading.Thread(target=delete_files_after_delay, args=(deletion_files, 15))
-            deleter_thread.start() # Start the thread immediately
+            deleter_thread.start()
 
-            # Return the URLs for downloading the processed files
             return jsonify({
                 'message': 'File processed successfully',
                 'cleaned_url': f'/downloads/{cleaned_output_filename}',
@@ -114,7 +110,6 @@ def process_excel_file():
             }), 200
 
         except Exception as e:
-            # General error handling during processing
             print(f"Error during processing: {e}")
             return jsonify({'error': f'File processing failed: {str(e)}'}), 500
     else:
@@ -123,13 +118,7 @@ def process_excel_file():
 @app.route('/downloads/<filename>')
 def download_file(filename):
     """Serves the processed files for download."""
-    # Note: send_from_directory does not support after_request callbacks
-    # for direct file deletion. This is why a separate threading approach
-    # was used for delayed deletion after processing.
     return send_from_directory(app.config['PROCESSED_FOLDER'], filename, as_attachment=True)
 
-
 if __name__ == '__main__':
-    # For development, run with debug=True
-    # For production, use a WSGI server like Gunicorn
     app.run(debug=True, host='0.0.0.0', port=5000)
