@@ -8,9 +8,13 @@ import excel_processor
 
 app = Flask(__name__)
 
-# Configure upload and processed file directories
-UPLOAD_FOLDER = 'uploads'
-PROCESSED_FOLDER = 'processed_files'
+# --- Configure upload and processed file directories using absolute paths ---
+# Get the base directory where app.py is located
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
+PROCESSED_FOLDER = os.path.join(BASE_DIR, 'processed_files')
+
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['PROCESSED_FOLDER'] = PROCESSED_FOLDER
 
@@ -24,6 +28,12 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+# NOTE FOR PRODUCTION DEPLOYMENT:
+# The following function and its threading usage are NOT recommended for
+# production Flask applications served by WSGI servers like Gunicorn.
+# For robust background tasks in production, consider:
+# 1. Task Queue: Celery with Redis/RabbitMQ.
+# 2. Cron Job: A separate script run periodically by cron.
 def delete_files_after_delay(file_paths, delay_seconds=15):
     """
     Deletes a list of files after a specified delay.
@@ -34,16 +44,20 @@ def delete_files_after_delay(file_paths, delay_seconds=15):
         if os.path.exists(filepath):
             try:
                 os.remove(filepath)
+                # In production, use app.logger.info instead of print
                 print(f"Deleted processed file after {delay_seconds}s delay: {filepath}")
             except Exception as e:
+                # In production, use app.logger.error instead of print
                 print(f"Error deleting processed file {filepath}: {e}")
         else:
+            # In production, use app.logger.warning instead of print
             print(f"File not found for delayed deletion: {filepath}")
 
 @app.route('/')
 def serve_index():
     """Serves the index.html file."""
-    return send_from_directory('static', 'index.html')
+    # Ensure static files are served from the correct absolute path
+    return send_from_directory(os.path.join(BASE_DIR, 'static'), 'index.html')
 
 @app.route('/process-excel', methods=['POST'])
 def process_excel_file():
@@ -96,10 +110,11 @@ def process_excel_file():
                 cleaned_output_filepath,
                 excluded_output_filepath,
                 keywords_list,
-                input_sheet_name # NEW: Pass input sheet name
+                input_sheet_name
             )
 
             deletion_files = [cleaned_output_filepath, excluded_output_filepath]
+            # Consider removing threading.Thread for production as discussed
             deleter_thread = threading.Thread(target=delete_files_after_delay, args=(deletion_files, 15))
             deleter_thread.start()
 
@@ -110,6 +125,7 @@ def process_excel_file():
             }), 200
 
         except Exception as e:
+            # Use app.logger.error for production
             print(f"Error during processing: {e}")
             return jsonify({'error': f'File processing failed: {str(e)}'}), 500
     else:
@@ -118,7 +134,9 @@ def process_excel_file():
 @app.route('/downloads/<filename>')
 def download_file(filename):
     """Serves the processed files for download."""
-    return send_from_directory(app.config['PROCESSED_FOLDER'], filename, as_attachment=True)
+    # Ensure processed files are served from the correct absolute path
+    return send_from_directory(os.path.join(BASE_DIR, 'processed_files'), filename, as_attachment=True)
 
 if __name__ == '__main__':
+    # For local development ONLY. Gunicorn will ignore this.
     app.run(debug=True, host='0.0.0.0', port=6967)

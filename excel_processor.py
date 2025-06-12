@@ -1,181 +1,284 @@
 import pandas as pd
 import os
 import time
-import re # Import the re module for regular expressions
-import openpyxl # Import openpyxl to handle workbooks directly
-from openpyxl.utils.dataframe import dataframe_to_rows # To write DataFrame to existing sheet
+import re
+import openpyxl
+# Import openpyxl.styles for copying styles
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment, Protection
+from openpyxl.worksheet.hyperlink import Hyperlink # Import Hyperlink object
 
 def process_data_excel(input_filepath, cleaned_output_filepath, excluded_output_filepath, keywords_list=None, input_sheet_name='Sheet1', output_sheet_name='Processed Data'):
 
-    # Use default keywords if none are provided or the list is empty
-    if keywords_list is None or not keywords_list:
+    if keywords_list is None:
         keywords_list = []
 
-    # Create a temporary file to work with, in case the original has hidden sheets
-    temp_input_filepath = input_filepath + ".tmp"
-    
-    original_workbook = None 
+    original_workbook = None
     try:
         # Load the original workbook using openpyxl
         original_workbook = openpyxl.load_workbook(input_filepath)
 
         # Check if all sheets are hidden. If so, unhide the input_sheet_name temporarily.
-        # This prevents the "At least one sheet must be visible" error.
         all_sheets_hidden = all(sheet.sheet_state == 'hidden' or sheet.sheet_state == 'veryHidden' for sheet in original_workbook._sheets)
-        
+
         if all_sheets_hidden:
             if input_sheet_name not in original_workbook.sheetnames:
                 raise ValueError(f"Input sheet '{input_sheet_name}' not found in the Excel file, and all sheets are hidden.")
-            
-            # Temporarily unhide the input sheet
+
+            # Temporarily unhide the input sheet for openpyxl to access it
             original_workbook[input_sheet_name].sheet_state = 'visible'
             print(f"Temporarily unhid sheet '{input_sheet_name}' as all sheets were hidden.")
+
+        # Get the input sheet for processing
+        try:
+            input_sheet = original_workbook[input_sheet_name]
+        except KeyError:
+            raise ValueError(f"Input sheet '{input_sheet_name}' not found in the Excel file.")
+
+        # --- Identify 'KONTEN' and 'UUID' columns dynamically from the first row ---
+        header_row_cells = [cell for cell in input_sheet[1]] # Get the actual cell objects for the header row
+        konten_col_index = -1
+        uuid_col_index = -1 # New: Index for the 'UUID' column
         
-        # Save the potentially unhidden workbook to a temporary file
-        original_workbook.save(temp_input_filepath)
+        for idx, cell in enumerate(header_row_cells):
+            col_val = str(cell.value or '').strip().upper()
+            if col_val == 'KONTEN':
+                konten_col_index = idx # 0-indexed column
+            elif col_val == 'UUID': # Identify 'UUID' column
+                uuid_col_index = idx # 0-indexed column
 
-        # Read the Excel data from the specified input sheet into a pandas DataFrame
-        # Use the temporary file to ensure pandas reads the updated visibility
-        df = pd.read_excel(temp_input_filepath, sheet_name=input_sheet_name)
-
-        # --- Debugging: Print all columns found in the Excel file ---
-        print(f"Columns found in sheet '{input_sheet_name}' of {os.path.basename(input_filepath)}: {df.columns.tolist()}")
-
-        # Try to find the 'KONTEN' column robustly (case-insensitive, strip spaces)
-        konten_col_name = None
-        for col in df.columns:
-            normalized_col = str(col).strip().upper()
-            if normalized_col == 'KONTEN':
-                konten_col_name = col
-                break
-
-        if konten_col_name is None:
-            # If 'KONTEN' column is still not found after robust search
+        if konten_col_index == -1:
             raise ValueError(
-                f"'KONTEN' column not found in sheet '{input_sheet_name}' of {os.path.basename(input_filepath)}. "
-                f"Available columns are: {df.columns.tolist()}"
+                f"'KONTEN' column not found in sheet '{input_sheet_name}'. "
+                f"Available columns (from first row) are: {[cell.value for cell in header_row_cells]}"
             )
 
-        # Convert the identified 'KONTEN' column to string type and fill NaN values
-        df[konten_col_name] = df[konten_col_name].astype(str).fillna('')
+        # Create new workbooks for cleaned and excluded data
+        cleaned_workbook = openpyxl.Workbook()
+        excluded_workbook = openpyxl.Workbook()
 
-        # Initialize an empty mask that is all False, to collect rows for exclusion
-        combined_mask_exclude = pd.Series([False] * len(df), index=df.index)
+        # Remove default 'Sheet' created by openpyxl
+        if 'Sheet' in cleaned_workbook.sheetnames:
+            cleaned_workbook.remove(cleaned_workbook['Sheet'])
+        if 'Sheet' in excluded_workbook.sheetnames:
+            excluded_workbook.remove(excluded_workbook['Sheet'])
 
-        # 1. Create mask for keywords exclusion
-        for keyword in keywords_list:
-            # Combine individual keyword matches using logical OR
-            combined_mask_exclude = combined_mask_exclude | \
-                                    df[konten_col_name].str.contains(str(keyword).strip(), case=False, na=False)
+        # Create the primary sheets for processed data, inserting at the beginning
+        cleaned_ws = cleaned_workbook.create_sheet(title=output_sheet_name, index=0)
+        excluded_ws = excluded_workbook.create_sheet(title=output_sheet_name, index=0)
+        cleaned_ws.sheet_state = 'visible'
+        excluded_ws.sheet_state = 'visible'
 
-        # 2. Create mask for foreign language character exclusion (allowing emojis and common symbols)
-        # This regex targets specific Unicode ranges for common non-Latin scripts:
-        # Chinese (Han): \u4E00-\u9FFF
-        # Japanese (Hiragana/Katakana): \u3040-\u30FF (Hiragana), \u30A0-\u30FF (Katakana)
-        # Korean (Hangul): \uAC00-\uD7AF
-        # Devanagari (Hindi, etc.): \u0900-\u097F
-        # Arabic: \u0600-\u06FF
-        # Cyrillic: \u0400-\u04FF
-        # This pattern will match any character within these specific ranges.
+        # --- EXPLICITLY COPY HEADER ROW TO BOTH CLEANED AND EXCLUDED SHEETS (Skipping UUID) ---
+        current_row_in_cleaned = cleaned_ws.max_row + 1 # Should be 1
+        current_row_in_excluded = excluded_ws.max_row + 1 # Should be 1
+
+        target_col_idx_cleaned = 0 # Counter for column index in the new sheet
+        target_col_idx_excluded = 0 # Counter for column index in the new sheet
+
+        for c_idx, original_cell in enumerate(header_row_cells):
+            if c_idx == uuid_col_index: # Skip the UUID column
+                continue
+
+            # Copy to cleaned sheet
+            new_cleaned_cell = cleaned_ws.cell(row=current_row_in_cleaned, column=target_col_idx_cleaned + 1, value=original_cell.value)
+            if original_cell.font: new_cleaned_cell.font = original_cell.font.copy()
+            if original_cell.fill: new_cleaned_cell.fill = original_cell.fill.copy()
+            if original_cell.border: new_cleaned_cell.border = original_cell.border.copy()
+            if original_cell.alignment: new_cleaned_cell.alignment = original_cell.alignment.copy()
+            new_cleaned_cell.number_format = original_cell.number_format
+            if original_cell.protection: new_cleaned_cell.protection = original_cell.protection.copy()
+            if original_cell.hyperlink:
+                new_cleaned_cell.hyperlink = Hyperlink(ref=original_cell.hyperlink.ref,
+                                                       target=original_cell.hyperlink.target,
+                                                       tooltip=original_cell.hyperlink.tooltip,
+                                                       display=original_cell.hyperlink.display)
+            target_col_idx_cleaned += 1 # Increment only if cell was copied
+
+            # Copy to excluded sheet
+            new_excluded_cell = excluded_ws.cell(row=current_row_in_excluded, column=target_col_idx_excluded + 1, value=original_cell.value)
+            if original_cell.font: new_excluded_cell.font = original_cell.font.copy()
+            if original_cell.fill: new_excluded_cell.fill = original_cell.fill.copy()
+            if original_cell.border: new_excluded_cell.border = original_cell.border.copy()
+            if original_cell.alignment: new_excluded_cell.alignment = original_cell.alignment.copy()
+            new_excluded_cell.number_format = original_cell.number_format
+            if original_cell.protection: new_excluded_cell.protection = original_cell.protection.copy()
+            if original_cell.hyperlink:
+                new_excluded_cell.hyperlink = Hyperlink(ref=original_cell.hyperlink.ref,
+                                                       target=original_cell.hyperlink.target,
+                                                       tooltip=original_cell.hyperlink.tooltip,
+                                                       display=original_cell.hyperlink.display)
+            target_col_idx_excluded += 1 # Increment only if cell was copied
+
+        # Copy row dimension for the header row
+        original_header_row_dim = input_sheet.row_dimensions[1]
+        cleaned_ws.row_dimensions[current_row_in_cleaned].height = original_header_row_dim.height
+        excluded_ws.row_dimensions[current_row_in_excluded].height = original_header_row_dim.height
+
+        # Foreign character pattern (allowing emojis and common symbols)
         foreign_character_pattern = r'[\u4E00-\u9FFF\uAC00-\uD7AF\u0900-\u097F\u0600-\u06FF\u0400-\u04FF]'
-        mask_foreign_characters = df[konten_col_name].str.contains(foreign_character_pattern, regex=True, na=False)
 
-        # Combine keyword exclusion mask AND foreign character exclusion mask using logical OR
-        # A row is excluded if it matches a keyword OR contains foreign language characters.
-        combined_mask_exclude = combined_mask_exclude | mask_foreign_characters
+        # Iterate through DATA ROWS of the input sheet (starting from row 2, skipping the header)
+        for r_idx, row_cells in enumerate(input_sheet.iter_rows(min_row=2), 2): # Start from 2 to get actual row number
+            # Get the cell from the 'KONTEN' column for the current row
+            # Ensure it's within bounds for the current row_cells list
+            if konten_col_index >= len(row_cells):
+                # If the row is shorter than expected and doesn't have a KONTEN column, skip or handle
+                continue
 
-        # Create two DataFrames based on the combined exclusion mask:
-        # 1. Cleaned data: rows where the combined_mask_exclude is False (do NOT contain any keywords or foreign language characters)
-        df_cleaned = df[~combined_mask_exclude]
-        # 2. Excluded data: rows where the combined_mask_exclude is True (DO contain any keywords or foreign language characters)
-        df_excluded = df[combined_mask_exclude]
+            konten_cell = row_cells[konten_col_index]
+            # Get the value from the cell, convert to string for processing, handle None values
+            konten_value = str(konten_cell.value or '').strip()
 
-        # --- Save the DataFrames to output files, preserving other sheets ---
-        for output_df, output_filepath, file_type in [(df_cleaned, cleaned_output_filepath, "Cleaned data"), (df_excluded, excluded_output_filepath, "Excluded items")]:
-            # Always start with a fresh workbook for each output file
-            # This simplifies the logic of copying sheets
-            output_workbook = openpyxl.Workbook()
-            
-            # Remove the default 'Sheet' created by openpyxl
-            if 'Sheet' in output_workbook.sheetnames:
-                output_workbook.remove(output_workbook['Sheet'])
+            # Determine if this row should be excluded
+            exclude_row = False
 
-            # Copy all sheets from the original workbook EXCEPT the input sheet
-            # and ensure they are visible in the output workbook
+            # Check for keywords exclusion (case-insensitive)
+            for keyword in keywords_list:
+                if str(keyword).strip().lower() in konten_value.lower():
+                    exclude_row = True
+                    break # Found a keyword, exclude this row
+
+            # Check for foreign language characters (only if not already excluded by keyword)
+            if not exclude_row:
+                if re.search(foreign_character_pattern, konten_value):
+                    exclude_row = True
+
+            # Decide which sheet(s) to copy this row to
+            target_sheets = []
+            if exclude_row:
+                target_sheets.append(excluded_ws)
+            else:
+                target_sheets.append(cleaned_ws)
+
+            # Copy cells to the target sheets, preserving all properties
+            for target_ws in target_sheets:
+                current_row_in_target = target_ws.max_row + 1
+                target_col_idx_data = 0 # Reset column index for data rows
+                for c_idx, original_cell in enumerate(row_cells):
+                    if c_idx == uuid_col_index: # Skip the UUID column
+                        continue
+                    
+                    new_cell = target_ws.cell(row=current_row_in_target, column=target_col_idx_data + 1, value=original_cell.value)
+
+                    # Copy style properties
+                    if original_cell.font: new_cell.font = original_cell.font.copy()
+                    if original_cell.fill: new_cell.fill = original_cell.fill.copy()
+                    if original_cell.border: new_cell.border = original_cell.border.copy()
+                    if original_cell.alignment: new_cell.alignment = original_cell.alignment.copy()
+                    new_cell.number_format = original_cell.number_format
+                    if original_cell.protection: new_cell.protection = original_cell.protection.copy()
+
+                    # Explicitly copy hyperlink property
+                    if original_cell.hyperlink:
+                        new_cell.hyperlink = Hyperlink(ref=original_cell.hyperlink.ref,
+                                                       target=original_cell.hyperlink.target,
+                                                       tooltip=original_cell.hyperlink.tooltip,
+                                                       display=original_cell.hyperlink.display)
+                    target_col_idx_data += 1 # Increment only if cell was copied
+
+            # Copy row dimensions (height) from original to target sheets for data rows
+            original_data_row_dim = input_sheet.row_dimensions[r_idx]
+            for target_ws in target_sheets:
+                target_ws.row_dimensions[current_row_in_target].height = original_data_row_dim.height
+
+        # Copy column dimensions (width) from input sheet to the primary processed sheets
+        # This needs to be done after all rows are written to ensure it's applied correctly
+        for col_dim in input_sheet.column_dimensions.values():
+            # Only copy if width is explicitly set and it's not the UUID column
+            if col_dim.width and (col_dim.index is None or openpyxl.utils.column_index_from_string(col_dim.index) -1 != uuid_col_index): # Adjust index for 0-based
+                cleaned_ws.column_dimensions[col_dim.index].width = col_dim.width
+                excluded_ws.column_dimensions[col_dim.index].width = col_dim.width
+
+        # Copy all other sheets from the original workbook to both output workbooks
+        for workbook in [cleaned_workbook, excluded_workbook]:
             for sheet_name in original_workbook.sheetnames:
-                if sheet_name != input_sheet_name: # Do not copy the input sheet itself
+                # Do not copy the input sheet itself, as its data is handled by the row-by-row logic above
+                if sheet_name != input_sheet_name:
                     original_sheet = original_workbook[sheet_name]
-                    new_ws = output_workbook.create_sheet(title=sheet_name)
-                    new_ws.sheet_state = 'visible' # Ensure copied sheets are visible
+                    # Create a new sheet in the output workbook with the same title
+                    new_ws = workbook.create_sheet(title=sheet_name)
+                    new_ws.sheet_state = original_sheet.sheet_state # Preserve hidden/visible state
 
-                    # Copy all cells, including formatting
-                    for row in original_sheet.iter_rows():
-                        for cell in row:
-                            new_cell = new_ws[cell.coordinate]
-                            new_cell.value = cell.value
-                            if cell.has_style:
-                                new_cell.font = cell.font.copy()
-                                new_cell.fill = cell.fill.copy()
-                                new_cell.border = cell.border.copy()
-                                new_cell.alignment = cell.alignment.copy()
-                                new_cell.number_format = cell.number_format
-                                new_cell.protection = cell.protection.copy()
+                    # Copy all cells, including formatting and hyperlinks
+                    target_other_sheet_col_idx = 0 # Counter for columns in other sheets
+                    for row in original_sheet.iter_rows(values_only=False):
+                        for c_idx, cell in enumerate(row):
+                            if c_idx == uuid_col_index: # Skip the UUID column even in other sheets if present
+                                continue
+                            
+                            new_cell = new_ws.cell(row=cell.row, column=target_other_sheet_col_idx + 1, value=cell.value) # Use cell.row to maintain original row position for other sheets
 
-                    # Copy column dimensions
+                            if cell.font: new_cell.font = cell.font.copy()
+                            if cell.fill: new_cell.fill = cell.fill.copy()
+                            if cell.border: new_cell.border = cell.border.copy()
+                            if cell.alignment: new_cell.alignment = cell.alignment.copy()
+                            new_cell.number_format = cell.number_format
+                            if cell.protection: new_cell.protection = cell.protection.copy()
+                            if cell.hyperlink:
+                                new_cell.hyperlink = Hyperlink(ref=cell.hyperlink.ref,
+                                                               target=cell.hyperlink.target,
+                                                               tooltip=cell.hyperlink.tooltip,
+                                                               display=cell.hyperlink.display)
+                            target_other_sheet_col_idx += 1 # Increment only if cell was copied
+
+                    # Copy column dimensions (and skip UUID if identified)
                     for col_dim in original_sheet.column_dimensions.values():
-                        new_ws.column_dimensions[col_dim.index].width = col_dim.width
+                        if col_dim.width and (col_dim.index is None or openpyxl.utils.column_index_from_string(col_dim.index) -1 != uuid_col_index):
+                            new_ws.column_dimensions[col_dim.index].width = col_dim.width
                     # Copy row dimensions
                     for row_dim in original_sheet.row_dimensions.values():
-                        new_ws.row_dimensions[row_dim.index].height = row_dim.height
-            
-            # Create or replace the processed data sheet
-            if output_sheet_name in output_workbook.sheetnames:
-                output_workbook.remove(output_workbook[output_sheet_name])
-            
-            processed_ws = output_workbook.create_sheet(title=output_sheet_name, index=0) # Add at the beginning
-            processed_ws.sheet_state = 'visible' # Ensure processed sheet is visible
+                        if row_dim.height:
+                            new_ws.row_dimensions[row_dim.index].height = row_dim.height
 
-            # Write the DataFrame to the new sheet
-            for r_idx, row in enumerate(dataframe_to_rows(output_df, index=False, header=True), 1):
-                processed_ws.append(row)
-            
-            # Auto-fit column widths for the processed sheet for better readability
-            for column in processed_ws.columns:
+
+        # Auto-fit column widths for the main processed sheets for better readability
+        # This will only apply to the sheets with new data, not the copied raw sheets.
+        for ws in [cleaned_ws, excluded_ws]:
+            for column_idx, column in enumerate(ws.columns):
+                # Ensure we only process existing columns and apply auto-fit based on actual content
                 max_length = 0
-                column_name = column[0].column_letter # Get the column name
                 for cell in column:
                     try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
+                        if cell.value is not None:
+                            current_length = len(str(cell.value))
+                            if current_length > max_length:
+                                max_length = current_length
+                    except TypeError:
                         pass
-                adjusted_width = (max_length + 2)
-                processed_ws.column_dimensions[column_name].width = adjusted_width
+                # Get the column letter for the current column_idx
+                column_letter = openpyxl.utils.get_column_letter(column_idx + 1)
+                adjusted_width = min((max_length + 2), 75)
+                if adjusted_width > 0:
+                    ws.column_dimensions[column_letter].width = adjusted_width
 
-            output_workbook.save(output_filepath)
-            print(f"{file_type} saved to {output_filepath} in sheet '{output_sheet_name}' and other sheets preserved.")
+        # Save the workbooks
+        cleaned_workbook.save(cleaned_output_filepath)
+        excluded_workbook.save(excluded_output_filepath)
+
+        print(f"Cleaned data saved to {cleaned_output_filepath} in sheet '{output_sheet_name}' and other sheets preserved.")
+        print(f"Excluded items saved to {excluded_output_filepath} in sheet '{output_sheet_name}' and other sheets preserved.")
 
     except FileNotFoundError:
         raise FileNotFoundError(f"Input file not found at {input_filepath}")
     except ValueError as e:
-        # Catch specific ValueErrors (e.g., sheet not found)
         raise e
     except Exception as e:
-        # Catch any other unexpected errors during pandas/openpyxl operations
+        # Catch any other unexpected errors during openpyxl operations
         raise Exception(f"An error occurred during data processing: {e}")
     finally:
-        # --- Delete the original uploaded input file and the temporary file immediately after processing ---
+        # Delete the original uploaded input file and the temporary file (if created)
+        # Add small delay to ensure file handles are released before deletion
+        time.sleep(0.1) # Small delay to help ensure file handles are released
         if os.path.exists(input_filepath):
             try:
-                time.sleep(0.1) # Small delay to ensure file handles are released
                 os.remove(input_filepath)
-                print(f"Deleted uploaded temporary file: {input_filepath}")
+                print(f"Deleted uploaded input file: {input_filepath}")
             except Exception as e:
                 print(f"Error deleting input file {input_filepath}: {e}")
-        if os.path.exists(temp_input_filepath):
-            try:
-                time.sleep(0.1) # Small delay
-                os.remove(temp_input_filepath)
-                print(f"Deleted temporary working file: {temp_input_filepath}")
-            except Exception as e:
-                print(f"Error deleting temporary file {temp_input_filepath}: {e}")
+        # The temporary file is no longer created by the new openpyxl-direct processing logic
+        # if os.path.exists(temp_input_filepath):
+        #     try:
+        #         os.remove(temp_input_filepath)
+        #         print(f"Deleted temporary working file: {temp_input_filepath}")
+        #     except Exception as e:
+        #         print(f"Error deleting temporary file {temp_input_filepath}: {e}")
